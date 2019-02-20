@@ -11,15 +11,13 @@ object BloomFilterDistanceBenchmark {
       BFSparse(hashes, RichCBitSet.fromArray(hashes(item)), width)
     case bfs @ BFSparse(_, _, _) => bfs
     case BFInstance(hashes, bitset, width) =>
-      BFSparse(hashes, RichCBitSet.fromBitSet(bitset), width)
+      BFSparse(hashes, RichCBitSet.fromJBitSet(bitset), width)
   }
 
   def toDense[A](bf: BF[A]): BFInstance[A] = bf match {
     case BFZero(hashes, width) => BFInstance.empty[A](hashes, width)
-    case BFItem(item, hashes, width) =>
-      val bs = LongBitSet.empty(width)
-      bs += hashes(item)
-      BFInstance(hashes, bs.toBitSetNoCopy, width)
+    case bf@BFItem(item, hashes, width) =>
+      BFInstance(hashes, bf.toBitSet, width)
     case bfs @ BFSparse(hashes, bitset, width)   => bfs.dense
     case bfi @ BFInstance(hashes, bitset, width) => bfi
   }

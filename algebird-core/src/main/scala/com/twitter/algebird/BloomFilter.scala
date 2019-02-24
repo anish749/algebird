@@ -463,10 +463,7 @@ case class BFSparse[A](hashes: BFHash[A], bits: CBitSet, width: Int) extends BF[
   }
 
   def +(item: A): BF[A] = {
-    val bitsToActivate = bits.clone
-    bitsToActivate += hashes(item)
-
-    BFSparse(hashes, bitsToActivate, width)
+    BFInstance(hashes, bits.toCatsBitSet | CatsBitSet(hashes(item):_*), width)
   }
 
   def checkAndAdd(other: A): (BF[A], ApproximateBoolean) =

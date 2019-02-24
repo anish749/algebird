@@ -19,9 +19,7 @@ object BloomFilterTestUtils {
   def toDense[A](bf: BF[A]): BFInstance[A] = bf match {
     case BFZero(hashes, width) => BFInstance.empty[A](hashes, width)
     case BFItem(item, hashes, width) =>
-      val bs = LongBitSet.empty(width)
-      bs += hashes(item)
-      BFInstance(hashes, bs.toBitSetNoCopy, width)
+      BFInstance(hashes, cats.collections.BitSet(hashes(item):_*), width)
     case bfs @ BFSparse(hashes, bitset, width)   => bfs.dense
     case bfi @ BFInstance(hashes, bitset, width) => bfi
   }

@@ -13,6 +13,7 @@ val scalacheckVersion = "1.13.4"
 val utilVersion = "6.20.0"
 val utilVersion212 = "6.39.0"
 val sparkVersion = "2.4.0"
+val catsCollectionsVersion = "0.8.0-SNAPSHOT"
 
 def scalaBinaryVersion(scalaVersion: String) = scalaVersion match {
   case version if version startsWith "2.10" => "2.10"
@@ -194,6 +195,7 @@ lazy val algebirdCore = module("core").settings(
   libraryDependencies ++=
     Seq("com.googlecode.javaewah" % "JavaEWAH" % javaEwahVersion,
         "org.typelevel" %% "algebra" % algebraVersion,
+        "org.typelevel" %% "cats-collections-core" % catsCollectionsVersion,
         "org.scala-lang" % "scala-reflect" % scalaVersion.value,
         "org.scalatest" %% "scalatest" % scalaTestVersion % "test") ++ {
       if (isScala210x(scalaVersion.value))
@@ -227,7 +229,8 @@ lazy val algebirdBenchmark = module("benchmark")
   .settings(noPublishSettings)
   .settings(
    coverageExcludedPackages := "com\\.twitter\\.algebird\\.benchmark.*",
-   libraryDependencies ++= Seq("com.twitter" %% "bijection-core" % bijectionVersion)
+   libraryDependencies ++= Seq("com.twitter" %% "bijection-core" % bijectionVersion,
+     "com.clearspring.analytics"   % "stream" % "2.9.5")
 ).dependsOn(algebirdCore, algebirdUtil, algebirdTest % "test->compile").enablePlugins(JmhPlugin)
 
 lazy val algebirdUtil = module("util").settings(

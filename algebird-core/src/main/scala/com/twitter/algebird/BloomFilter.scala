@@ -17,9 +17,8 @@ limitations under the License.
 package com.twitter.algebird
 
 import algebra.BoundedSemilattice
-import com.googlecode.javaewah.IntIterator
-import com.googlecode.javaewah.{EWAHCompressedBitmap => CBitSet}
-import scala.collection.immutable.BitSet
+import cats.collections.{BitSet => CatsBitSet}
+import com.googlecode.javaewah.{IntIterator, EWAHCompressedBitmap => CBitSet}
 
 object RichCBitSet {
   def apply(xs: Int*): CBitSet = fromArray(xs.toArray)
@@ -29,7 +28,8 @@ object RichCBitSet {
     val bs = new CBitSet
     bs += x
   }
-  def fromBitSet(bs: BitSet): CBitSet = {
+
+  def fromBitSet(bs: CatsBitSet): CBitSet = {
     val nbs = new CBitSet
     val it = bs.iterator
     while (it.hasNext) { nbs.set(it.next) }
@@ -55,44 +55,8 @@ class RichCBitSet(val cb: CBitSet) extends AnyVal {
     cb
   }
 
-  def toBitSet(width: Int): BitSet = {
-    val a = LongBitSet.empty(width)
-    val iter = cb.intIterator
-    while (iter.hasNext) {
-      val i = iter.next
-      a.set(i)
-    }
-    a.toBitSetNoCopy
-  }
-}
-
-private[algebird] case class LongBitSet(toArray: Array[Long]) extends AnyVal {
-  def toBitSetNoCopy: BitSet =
-    BitSet.fromBitMaskNoCopy(toArray)
-
-  def set(i: Int): Unit =
-    toArray(i / 64) |= 1L << (i % 64)
-
-  def +=(xs: Array[Int]): Unit = {
-    var idx = 0
-    while (idx < xs.length) {
-      set(xs(idx))
-      idx += 1
-    }
-  }
-
-  def +=(it: IntIterator): Unit =
-    while (it.hasNext) { set(it.next) }
-}
-
-private[algebird] object LongBitSet {
-  def empty(size: Int): LongBitSet =
-    LongBitSet(new Array[Long]((size + 63) / 64))
-  def fromCBitSet(cb: CBitSet, width: Int): LongBitSet = {
-    val lbs = empty(width)
-    lbs += cb.intIterator
-    lbs
-  }
+  def toCatsBitSet: CatsBitSet =
+    CatsBitSet(cb.toArray: _*)
 }
 
 object BloomFilter {
@@ -191,6 +155,8 @@ object BloomFilter {
 case class BloomFilterMonoid[A](numHashes: Int, width: Int)(implicit hash: Hash128[A])
     extends Monoid[BF[A]]
     with BoundedSemilattice[BF[A]] {
+
+  import RichCBitSet._
   val hashes: BFHash[A] = BFHash[A](numHashes, width)(hash)
 
   val zero: BF[A] = BFZero[A](hashes, width)
@@ -204,45 +170,23 @@ case class BloomFilterMonoid[A](numHashes: Int, width: Int)(implicit hash: Hash1
   override def sumOption(as: TraversableOnce[BF[A]]): Option[BF[A]] =
     if (as.isEmpty) None
     else {
-      // share a single mutable bitset
-      val longBitSet = LongBitSet.empty(width)
-      var sets = 0
-
-      @inline def set(i: Int): Unit = {
-        longBitSet.set(i)
-        sets += 1
-      }
-
-      var oneItem: BFItem[A] = null
-
-      @inline def add(it: BFItem[A]): Unit = {
-        oneItem = it
-        val hs = hashes(it.item)
-        var pos = 0
-        while (pos < hs.length) {
-          set(hs(pos))
-          pos += 1
-        }
-      }
+      var bits = CatsBitSet()
 
       as.foreach {
-        case BFZero(_, _)         => ()
-        case bf @ BFItem(_, _, _) => add(bf)
+        case BFZero(_, _) => ()
+        case bf @ BFItem(item, _, _) =>
+          bits = bits | CatsBitSet(hashes(item): _*)
         case BFSparse(_, cbitset, _) =>
-          val iter = cbitset.intIterator
-          while (iter.hasNext) { set(iter.next) }
-
+          bits = bits | cbitset.toCatsBitSet
         case BFInstance(_, bitset, _) =>
-          // these Ints are boxed so, that's a minor bummer
-          val iter = bitset.iterator
-          while (iter.hasNext) { set(iter.next) }
+          bits = bits | bitset
       }
-      if (sets == 0) Some(zero)
-      else if (sets == numHashes && (oneItem != null)) Some(oneItem)
-      else if (sets < (width / 10)) {
-        val sbs = RichCBitSet.fromBitSet(longBitSet.toBitSetNoCopy)
+
+      if (bits.isEmpty) Some(zero) // TODO removed one item
+      else if (bits.size < (width / 10)) {
+        val sbs = RichCBitSet.fromBitSet(bits)
         Some(BFSparse(hashes, sbs, width))
-      } else Some(BFInstance(hashes, longBitSet.toBitSetNoCopy, width))
+      } else Some(BFInstance(hashes, bits, width))
     }
 
   /**
@@ -386,7 +330,7 @@ sealed abstract class BF[A] extends java.io.Serializable {
   // inserted into the Bloom Filter.
   def size: Approximate[Long]
 
-  def toBitSet: BitSet
+  def toBitSet: CatsBitSet
 
   /**
    * Compute the Hamming distance between the two Bloom filters
@@ -405,7 +349,7 @@ sealed abstract class BF[A] extends java.io.Serializable {
       case (x: BFSparse[A], y: BFSparse[A]) => x.bits.xorCardinality(y.bits)
 
       // Otherwise compare as bit sets
-      case (_, _) => (this.toBitSet ^ that.toBitSet).size
+      case (_, _) => (this.toBitSet ^ that.toBitSet).size.toInt
     }
 
 }
@@ -415,7 +359,7 @@ sealed abstract class BF[A] extends java.io.Serializable {
  */
 case class BFZero[A](hashes: BFHash[A], width: Int) extends BF[A] {
 
-  def toBitSet: BitSet = BitSet()
+  def toBitSet: CatsBitSet = CatsBitSet()
 
   def numHashes: Int = hashes.size
 
@@ -442,10 +386,7 @@ case class BFItem[A](item: A, hashes: BFHash[A], width: Int) extends BF[A] {
   def numHashes: Int = hashes.size
   def numBits = numHashes
 
-  def toBitSet: BitSet = {
-    val hashvalues = hashes(item)
-    BitSet(hashvalues: _*)
-  }
+  def toBitSet: CatsBitSet = CatsBitSet(hashes(item): _*)
 
   private[algebird] def toSparse: BFSparse[A] =
     BFSparse[A](hashes, RichCBitSet.fromArray(hashes(item)), width)
@@ -479,7 +420,7 @@ case class BFSparse[A](hashes: BFHash[A], bits: CBitSet, width: Int) extends BF[
 
   def numHashes: Int = hashes.size
 
-  def toBitSet: BitSet = bits.toBitSet(width)
+  def toBitSet: CatsBitSet = bits.toCatsBitSet
 
   def numBits: Int = {
     val it = bits.intIterator
@@ -494,7 +435,7 @@ case class BFSparse[A](hashes: BFHash[A], bits: CBitSet, width: Int) extends BF[
   /**
    * Convert to a dense representation
    */
-  def dense: BFInstance[A] = BFInstance[A](hashes, bits.toBitSet(width), width)
+  def dense: BFInstance[A] = BFInstance[A](hashes, toBitSet, width)
 
   def ++(other: BF[A]): BF[A] = {
     require(this.width == other.width)
@@ -514,10 +455,7 @@ case class BFSparse[A](hashes: BFHash[A], bits: CBitSet, width: Int) extends BF[
           BFSparse(hashes, bits ++ otherBits, width)
         } else {
           // Make a dense bitset
-          val lbs = LongBitSet.empty(width)
-          lbs += bits.intIterator
-          lbs += otherBits.intIterator
-          BFInstance(hashes, lbs.toBitSetNoCopy, width)
+          BFInstance(hashes, bits.toCatsBitSet | otherBits.toCatsBitSet, width)
         }
       }
       case _ => other ++ this
@@ -549,21 +487,21 @@ case class BFSparse[A](hashes: BFHash[A], bits: CBitSet, width: Int) extends BF[
     BloomFilter.sizeEstimate(numBits, numHashes, width, 0.05)
 }
 
-/*
- * Bloom filter with multiple values
+/**
+ * BloomFilter Instance for multiple values backed by CatsCollectionBitSet
  */
-case class BFInstance[A](hashes: BFHash[A], bits: BitSet, width: Int) extends BF[A] {
+case class BFInstance[A](hashes: BFHash[A], bits: CatsBitSet, width: Int) extends BF[A] {
 
   def numHashes: Int = hashes.size
 
   /**
    * The number of bits set to true
    */
-  def numBits: Int = bits.size
+  def numBits: Int = bits.size.toInt
 
-  def toBitSet: BitSet = bits
+  def toBitSet: CatsBitSet = bits
 
-  def ++(other: BF[A]) = {
+  def ++(other: BF[A]): BF[A] = {
     require(this.width == other.width)
     require(this.numHashes == other.numHashes)
 
@@ -572,20 +510,17 @@ case class BFInstance[A](hashes: BFHash[A], bits: BitSet, width: Int) extends BF
       case BFItem(item, _, _)        => this + item
       case BFSparse(_, otherBits, _) =>
         // assume same hashes used
-        BFInstance(hashes, bits | (new RichCBitSet(otherBits)).toBitSet(width), width)
-      case bf @ BFInstance(_, otherBits, _) => {
+        BFInstance(hashes, bits | (new RichCBitSet(otherBits)).toCatsBitSet, width)
+      case bf @ BFInstance(_, otherBits, _) =>
         // assume same hashes used
-        BFInstance(hashes, bits ++ otherBits, width)
-      }
+        BFInstance(hashes, bits | otherBits, width)
     }
   }
 
   def +(item: A): BFInstance[A] = {
     val itemHashes = hashes(item)
-    val thisBS = LongBitSet.empty(width)
-    thisBS += itemHashes
-
-    BFInstance[A](hashes, bits | (thisBS.toBitSetNoCopy), width)
+    val thisBS = CatsBitSet(itemHashes: _*)
+    BFInstance[A](hashes, bits | thisBS, width)
   }
 
   def checkAndAdd(other: A): (BF[A], ApproximateBoolean) =
@@ -596,7 +531,7 @@ case class BFInstance[A](hashes: BFHash[A], bits: BitSet, width: Int) extends BF
     var idx = 0
     while (idx < il.length) {
       val i = il(idx)
-      if (!bits.contains(i)) return false
+      if (!bits(i)) return false
       idx += 1
     }
     true
@@ -612,7 +547,7 @@ object BFInstance {
     empty(hashes, width)
 
   def empty[A](hashes: BFHash[A], width: Int): BFInstance[A] =
-    BFInstance(hashes, BitSet.empty, width)
+    BFInstance(hashes, CatsBitSet.empty, width)
 }
 
 case class BFHash[A](numHashes: Int, width: Int)(implicit hash: Hash128[A]) {
